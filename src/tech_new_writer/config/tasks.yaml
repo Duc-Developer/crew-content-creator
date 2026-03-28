@@ -1,0 +1,88 @@
+trend_research_task:
+  description: >
+    Research {topic} from the approved sources below and extract only strong,
+    recent and source-grounded signals using the fetched source digest.
+
+    Approved sources:
+    {sources}
+
+    Fetched source digest:
+    {source_digest}
+
+    Requirements:
+    - Focus on the current year {current_year}.
+    - Use only items present in the fetched source digest as evidence.
+    - If a source digest section is empty or failed to load, ignore that source instead of inventing data.
+    - Prioritize stories, tutorials, launches, benchmarks, engineering lessons and trends
+      that are likely to matter to a Vietnamese tech audience.
+    - For each finding, include: source name, source URL, headline/topic, why it matters,
+      and the likely audience value.
+    - Ignore low-signal news, duplicated angles and speculative claims without support.
+  expected_output: >
+    A markdown research brief with 8-12 source-grounded findings. Each finding must contain:
+    source, url, insight summary, why it matters, and relevance for Vietnamese readers.
+    If fewer than 8 valid findings are available in the digest, return only the validated findings available.
+  agent: trend_researcher
+
+technical_review_task:
+  description: >
+    Review the research brief and validate the technical substance for {topic}.
+
+    Requirements:
+    - Check terminology, technical claims, causal statements and implied conclusions.
+    - Identify risks, limitations, assumptions, hype and missing context.
+    - Mark which findings are strong enough to keep in the final article.
+    - Add concise technical explanations where needed so the writer can explain the topic correctly.
+  expected_output: >
+    A markdown technical review containing:
+    1) validated insights to keep,
+    2) claims to soften or remove,
+    3) technical clarifications,
+    4) recommended angles for a high-quality article.
+  agent: sme
+
+seo_planning_task:
+  description: >
+    Build an SEO plan for a Vietnamese article about {topic} using the research and technical review.
+
+    Requirements:
+    - Define primary keyword, secondary keywords and search intent.
+    - Propose a compelling Vietnamese title, slug and meta description.
+    - Recommend heading structure and content angles that balance SEO with editorial quality.
+    - Avoid clickbait and keyword stuffing.
+  expected_output: >
+    A markdown SEO brief containing primary keyword, secondary keywords, search intent,
+    title options, suggested slug, meta description, and recommended H1/H2/H3 structure.
+  agent: seo_specialist
+
+article_writing_task:
+  description: >
+    Write a high-quality Vietnamese article about {topic} using the research brief,
+    technical review and SEO brief.
+
+    Requirements:
+    - Write in Vietnamese.
+    - Preserve factual accuracy and only use claims supported by the previous steps.
+    - Start with a strong introduction explaining why the topic matters now.
+    - Organize the article into a clear, reader-friendly structure with meaningful headings.
+    - Synthesize insights from the approved sources instead of copying any source wording.
+    - Include a short section summarizing practical implications for engineers, builders or tech leaders in Vietnam.
+    - End with a concise conclusion.
+  expected_output: >
+    A polished Vietnamese markdown article ready for final editing, with a title,
+    intro, structured sections, conclusion and a short "Nguồn tham khảo" section listing source URLs.
+  agent: content_writer
+
+final_edit_task:
+  description: >
+    Edit the drafted Vietnamese article into a publication-ready final version.
+
+    Requirements:
+    - Improve clarity, flow, consistency and tone.
+    - Remove repetition, weak transitions and unnecessary filler.
+    - Preserve technical accuracy and SEO intent.
+    - Ensure the final article reads naturally for Vietnamese tech readers.
+    - Output only the final article in markdown format.
+  expected_output: >
+    A final publication-ready Vietnamese markdown article without code fences.
+  agent: editor
