@@ -1,278 +1,323 @@
-# Tích hợp OpenClaw trên VPS: Pipeline tạo nội dung tự động hằng ngày với scheduler, queue, RAG và guardrails (production-first)
+Cover Image: https://huggingface.co/blog/assets/liberate-your-openclaw/thumbnail.png  
+Cover Image Source: https://huggingface.co/blog/liberate-your-openclaw
 
-Xuất bản đều đặn đang trở thành lợi thế cạnh tranh cho blog kỹ thuật, site SEO, bản tin nội bộ và tài liệu sản phẩm. Tuy nhiên, “tạo nội dung tự động hằng ngày” chỉ có giá trị khi bạn kiểm soát được **chi phí**, **độ tin cậy**, **chất lượng** và **rủi ro pháp lý/uy tín**. Vì vậy, thay vì dựa hoàn toàn vào các công cụ dạng GUI/SaaS hoặc workflow thủ công, nhiều đội ngũ (đặc biệt team nhỏ/solo builder) chuyển sang mô hình **tự host trên VPS** để chạy pipeline theo lịch, có giám sát và có cơ chế kiểm soát chất lượng.
+# Hướng dẫn tích hợp OpenCLaw bằng Docker (Dockerfile, Compose và best practices)
 
-Bài viết này hướng dẫn cách **tích hợp OpenClaw vào VPS** theo hướng **production-first**. Lưu ý: các nguồn tham khảo gợi mở xu hướng “tự host/tự chủ” và thiết kế workflow kiểu agent, nhưng **không nên mặc định OpenClaw chắc chắn hỗ trợ mọi tính năng cụ thể** nếu bạn chưa xác minh tài liệu/repo/giấy phép. Vì vậy, bài viết dùng “OpenClaw” theo nghĩa trung tính: một lớp **điều phối workflow kiểu agent/module** (gọi LLM + tool theo nhiều bước). Phần còn lại (scheduler/queue/DB/CMS/monitoring) là các lớp vận hành tiêu chuẩn khi triển khai trên VPS.
+OpenClaw (nhiều truy vấn SEO viết là **OpenCLaw**) thường được nhắc đến trong bối cảnh “agentic productivity”: dùng autonomous agents để tự động hoá chuỗi tác vụ, giúp team nhỏ vẫn “ship” được nhiều thứ. Nhưng khi bạn chuyển từ demo local sang chạy trong team, CI/CD hoặc staging/production, bài toán không còn là “prompt hay” mà là:
 
----
+- Môi trường chạy có **tái lập** (reproducible) không?
+- Cấu hình và secrets có **quản trị được** không?
+- Hệ có **logging/giám sát/kiểm thử/guardrails** đủ để vận hành không?
 
-## 1) “Tích hợp OpenClaw vào VPS” thực chất là ghép 4 lớp
-
-Để chạy ổn định hằng ngày, bạn cần nhìn hệ thống theo 4 lớp rõ ràng:
-
-1) **Runtime & packaging**: Docker/venv, pin phiên bản, build image, tái lập môi trường  
-2) **Secrets & config**: API key (LLM/embedding), token CMS, `.env`/Vault/SSM, phân quyền, rotate key  
-3) **Orchestration**: cron hoặc systemd timers (hoặc Airflow/Prefect khi phức tạp) + queue/worker  
-4) **I/O systems**: Postgres, Redis, vector store (ví dụ pgvector), object storage, CMS API
-
-> Nếu OpenClaw là framework “agent”, nó thường nằm ở lớp **logic điều phối các bước** (plan/act/observe, tool-calling), chứ **không thay thế** các thành phần vận hành còn lại.
+Bài viết này hướng dẫn cách **tích hợp OpenCLaw bằng Docker** theo hướng thực dụng: bắt đầu từ stack tối thiểu (chạy được), mở rộng bằng Docker Compose (Redis/Vector DB), rồi chốt checklist production-grade: pin version, secrets, logging, evaluation và guardrails.
 
 ---
 
-## 2) Kiến trúc tham chiếu cho “content factory” chạy hằng ngày trên VPS
+## 1) Chốt “OpenClaw chạy kiểu gì?” trước khi Docker hoá
 
-Một kiến trúc tối giản nhưng đủ “production-first” cho xuất bản hằng ngày:
+Dockerfile/Compose chỉ “khớp” khi bạn xác định rõ runtime. Trước khi bắt tay vào viết cấu hình, hãy trả lời 3 câu hỏi:
 
-**Scheduler (cron/systemd timer)**  
-→ đẩy job theo ngày vào **Queue (Redis)**  
-→ **Workers** xử lý tuần tự các bước: *Research → Outline → Draft → Edit → Publish*  
-→ truy xuất tri thức từ **RAG store** (Postgres + pgvector) để giảm bịa và tạo trích dẫn  
-→ **Publisher** gọi API của CMS (WordPress/Ghost/Strapi/…)  
-→ mọi thứ ghi **log/metrics/audit trail** để truy vết.
+1) **OpenClaw chạy dạng nào?**
+- **CLI/worker**: chạy job theo lệnh, xử lý queue, cron, pipeline.
+- **API server**: nhận request (ví dụ FastAPI/Express), có endpoint healthcheck.
 
-### Vì sao nên có queue/worker thay vì chạy một script “tất cả trong một”?
-- **Retry/backoff theo từng bước** (crawl, RAG, publish) thay vì fail cả pipeline  
-- **Tách tải và cô lập lỗi**: research có thể chậm, publish cần idempotency; tách worker giúp ổn định  
-- **Quan sát tốt hơn**: dễ gắn correlation id, trả lời được “bài hôm nay fail ở đâu”  
-- **Scale hợp lý**: tăng số worker khi cần thông lượng cao, không phải viết lại hệ thống
+2) **Có phụ thuộc stateful không?**  
+Với agent stack, các mảnh ghép hay gặp:
+- **Redis** (cache/queue/rate limit)
+- **Vector DB** (retrieval, embeddings)
+- **Observability** (log/tracing/metrics)
 
-Cách tiếp cận workflow nhiều bước (thường được gọi là “agentic pipeline”) giúp tăng thông lượng **nếu** bạn có checkpoint chất lượng và cơ chế giám sát; không nên kỳ vọng “tự trị hoàn toàn” là tự ra bài tốt.
+3) **Biến môi trường tối thiểu là gì?**  
+Ví dụ: API key LLM, model/provider, URL Redis/Vector DB, tool allowlist, timeout, policy…
 
----
-
-## 3) Chuẩn bị VPS và quyết định cách chạy LLM (CPU-only, GPU, hay hybrid)
-
-### Khuyến nghị thực dụng cho đa số đội nhỏ: **hybrid**
-- VPS chạy: scheduler + queue + RAG + publish + logging/monitoring  
-- LLM inference: gọi qua API (giảm gánh GPU, dễ vận hành, dễ kiểm soát)
-
-**CPU-only VPS** vẫn triển khai tốt nếu bạn:
-- không chạy local LLM lớn trên máy
-- ưu tiên độ ổn định và chi phí thấp
-- chấp nhận độ trễ phụ thuộc API bên ngoài
-
-**GPU VPS** chỉ nên chọn khi:
-- bạn cần local inference vì lý do dữ liệu/tuân thủ/chi phí dài hạn
-- hoặc cần throughput embedding/RAG cao tại chỗ
+Gợi ý định hướng: bài “Liberate your OpenClaw” nhấn mạnh việc làm OpenClaw dễ tiếp cận/triển khai hơn; còn bài trên Towards Data Science đặt OpenClaw trong bối cảnh agent chạy chuỗi tác vụ dài. Khi nhu cầu chạy lặp lại tăng, container hoá bằng Docker là lựa chọn phổ biến để chuẩn hoá runtime (không phải “bắt buộc”, nhưng rất hiệu quả trong thực tế).
 
 ---
 
-## 4) Đóng gói dự án để chạy bền: cấu trúc repo, Docker và secrets
+## 2) Cấu trúc repo khuyến nghị (dễ Compose, dễ CI)
 
-### Cấu trúc repo gợi ý (dễ vận hành và audit)
-- `pipelines/`: điều phối các bước (OpenClaw orchestration logic)  
-- `prompts/`: prompt templates, version hóa thay đổi  
-- `tools/`: crawler, retrieval RAG, CMS client, validators  
-- `configs/`: cấu hình (không chứa secrets)  
-- `scripts/`: entrypoint, migration, housekeeping  
-- `migrations/`: schema DB  
-- `tests/`: unit + smoke test cho pipeline  
-- `docs/`: runbook, quy trình xử lý sự cố
+Một cấu trúc gọn, dễ mở rộng:
 
-### Quản lý secrets tối thiểu
-- Dùng `.env` trên VPS (quyền truy cập chặt), tuyệt đối không commit  
-- Tách môi trường: `ENV=prod|staging`  
-- Có quy trình rotate key (ít nhất: checklist + lịch thay key + nơi lưu an toàn)
+    .
+    ├─ openclaw_app/                 # mã nguồn (runner/server/worker)
+    ├─ configs/
+    │  ├─ config.yaml                # cấu hình không chứa secrets
+    │  └─ policy.yaml                # policy/guardrails (tuỳ chọn)
+    ├─ docker/
+    │  ├─ Dockerfile
+    │  └─ entrypoint.sh              # chuẩn hoá start-up
+    ├─ compose.yaml
+    ├─ .env.example
+    └─ Makefile                      # tiện chạy: up/down/logs/eval
 
-Nhóm biến thường gặp:
-- `LLM_API_KEY`, `EMBEDDING_API_KEY`  
-- `CMS_BASE_URL`, `CMS_TOKEN`  
-- `DATABASE_URL`, `REDIS_URL`
-
----
-
-## 5) Orchestration: chạy lịch hằng ngày bằng cron hoặc systemd timers
-
-### Cron: nhanh và đủ dùng cho pipeline nhỏ
-Ưu điểm: đơn giản, phổ biến. Nhược điểm: nếu không chuẩn hóa log/lock/retry, rất dễ “chạy chồng” hoặc khó debug.
-
-Ví dụ cron chạy 06:30 mỗi ngày (dạng mô tả; hãy tùy biến theo đường dẫn thực tế của bạn):
-
-    30 6 * * * cd /opt/content-factory && /usr/bin/docker compose run --rm scheduler
-
-Lưu ý production:
-- cố định timezone (tránh lệch lịch khi đổi cấu hình hệ thống)
-- chuẩn hóa log (stdout/stderr) để gom về nơi theo dõi
-- thêm cơ chế lock để tránh chạy song song
-
-### systemd timers: lựa chọn hợp lý cho production trên VPS
-systemd có journal logging, restart policy và quản trị dịch vụ rõ ràng.
-
-Ví dụ tối giản (dạng tham khảo):
-
-**Service** (oneshot):
-
-    [Unit]
-    Description=Daily Content Factory Runner
-
-    [Service]
-    Type=oneshot
-    WorkingDirectory=/opt/content-factory
-    ExecStart=/usr/bin/docker compose run --rm scheduler
-
-**Timer** (chạy 06:30 mỗi ngày):
-
-    [Unit]
-    Description=Run content factory daily
-
-    [Timer]
-    OnCalendar=*-*-* 06:30:00
-    Persistent=true
-
-    [Install]
-    WantedBy=timers.target
+Nguyên tắc:
+- **Không hardcode secrets** trong repo.
+- **Không bake secrets vào image** (tránh lộ qua layer/history).
+- Tách **config file** (mount read-only) và **env** (override theo môi trường).
 
 ---
 
-## 6) Thiết kế “agentic pipeline” với OpenClaw: nhiều bước, có hợp đồng I/O, có chặn lỗi
+## 3) Dockerfile mẫu (ưu tiên tái lập + an toàn cơ bản)
 
-Khi đưa workflow agent lên VPS, nguyên tắc quan trọng là: **agent = module có ràng buộc đầu vào/đầu ra**, không phải “AI tự trị”.
+Tài liệu nguồn không “đóng đinh” OpenClaw luôn là Python/Node/binary trong mọi dự án. Để dễ áp dụng, phần dưới dùng **mẫu Python** (phổ biến trong agent stack). Nếu bạn dùng Node, bạn vẫn giữ đúng các nguyên tắc: pin phiên bản, tận dụng cache theo layer, chạy non-root, log ra stdout/stderr.
 
-### Gợi ý phân vai (module) trong pipeline
-1) **Researcher**: thu thập nguồn, tóm tắt, trích ý chính  
-2) **Outliner**: dựng dàn ý, mục tiêu từ khóa, intent người đọc  
-3) **Writer**: viết bản nháp dựa trên dàn ý + context từ RAG  
-4) **Editor**: kiểm tra logic, mạch lạc, định dạng markdown, phát hiện điểm cần dẫn chứng  
-5) **Publisher**: chuẩn hóa metadata (slug, tags), gọi CMS API, đặt lịch publish
+### `docker/Dockerfile` (mẫu Python)
 
-### Chống vòng lặp và bùng chi phí (bắt buộc với tool-calling)
-- Giới hạn số bước: `max_steps`  
-- Timeout cho từng tool: crawl, search, publish  
-- Ngân sách theo bài/ngày: `budget_cap` (token/chi phí API)  
-- Tool allowlist: chỉ bật các tool cần thiết  
-- Rate limit: tránh tự spam API/CMS
+    # syntax=docker/dockerfile:1
+    FROM python:3.11-slim AS runtime
 
-### Contract I/O: chuẩn hóa bằng JSON schema
-Chuẩn hóa output giữa các bước giúp bạn:
-- log/audit rõ ràng
-- chạy lại từng bước khi lỗi mà không phá toàn pipeline
-- cắm “quality gate” chính xác hơn
+    # System deps tối thiểu (tuỳ dự án có thể cần thêm: git, build tools, libmagic,...)
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+      && rm -rf /var/lib/apt/lists/*
 
-Ví dụ output tối thiểu của bước Researcher (minh họa):
+    # Tạo user non-root
+    RUN useradd -m -u 10001 appuser
+    WORKDIR /app
 
-    {
-      "topic": "...",
-      "sources": [
-        {"title": "...", "url": "...", "notes": "..."}
-      ],
-      "key_points": ["...", "..."],
-      "risks": ["..."]
-    }
+    # Copy lockfile/requirements trước để tận dụng cache
+    COPY requirements.txt /app/requirements.txt
+    RUN pip install --no-cache-dir -r requirements.txt
 
----
+    # Copy source sau cùng
+    COPY openclaw_app/ /app/openclaw_app/
+    COPY docker/entrypoint.sh /app/entrypoint.sh
+    RUN chmod +x /app/entrypoint.sh && chown -R appuser:appuser /app
 
-## 7) RAG cho tiếng Việt/chuyên ngành: giảm bịa, tăng đúng ngữ cảnh, dễ truy vết
+    USER appuser
 
-Pipeline xuất bản hằng ngày sẽ nhanh chóng “đụng trần” nếu chỉ dựa vào trí nhớ mô hình. Pattern bền vững là **RAG**: lưu tri thức → truy xuất → đưa vào ngữ cảnh → yêu cầu trích dẫn.
+    # App đọc config từ mount + env
+    ENV APP_CONFIG=/app/configs/config.yaml
 
-### Tối thiểu vận hành: Postgres + pgvector
-Ưu điểm trên VPS nhỏ:
-- ít dịch vụ hơn (dễ backup/restore)
-- có thể dùng một DB để lưu cả job state, audit trail và vector
+    ENTRYPOINT ["/app/entrypoint.sh"]
 
-### Ingest RAG theo hướng thực dụng
-1) Thu thập tài liệu: docs sản phẩm, FAQ nội bộ, bài “chuẩn”, nguồn đáng tin  
-2) Chunking: cắt theo heading/đoạn có nghĩa (tránh quá dài gây loãng, quá ngắn gây thiếu ngữ cảnh)  
-3) Metadata bắt buộc: `source_url`, `title`, `published_at`, `topic`, `trust_level`  
-4) Embed và index vào pgvector  
-5) Retrieval: top-k + filter theo metadata (chủ đề/ngày/độ tin cậy)
+### `docker/entrypoint.sh` (ví dụ)
 
-### Citations là yêu cầu vận hành, không phải “phần trang trí”
-- Lưu danh sách tài liệu đã retrieve kèm URL/ID  
-- Xuất bản có mục “Nguồn tham khảo” hoặc chú thích nội bộ (tùy chuẩn của site)  
-- Khi có phản hồi sai: truy vết được bài được tạo từ nguồn nào, context nào
+    #!/usr/bin/env bash
+    set -euo pipefail
 
-### Khi nào cần domain-specific embeddings?
-- Domain nhiều thuật ngữ nội bộ/chuyên ngành (luật, y tế, fintech, du lịch chuyên sâu)  
-- Tiếng Việt nhiều biến thể diễn đạt khiến semantic search khó  
-- Bạn có dữ liệu đủ tốt và kế hoạch benchmark nội bộ (retrieval@k, nDCG)
+    # APP_MODE=server|worker
+    if [[ "${APP_MODE:-server}" == "server" ]]; then
+      exec python -m openclaw_app.server --config "${APP_CONFIG}"
+    else
+      exec python -m openclaw_app.worker --config "${APP_CONFIG}"
+    fi
 
-Kỳ vọng đúng: dựng PoC có thể nhanh, nhưng đưa vào production cần thêm vòng **làm sạch dữ liệu, đánh giá và giám sát drift**.
+Điểm cần nhớ:
+- Docker giúp “đóng băng” runtime và dependencies — đặc biệt hữu ích khi hệ sinh thái OSS AI thay đổi nhanh, dễ phát sinh dependency drift.
+- Docker **không** tự đảm bảo tái lập tuyệt đối trong mọi điều kiện (GPU/driver host, quyền file/volume, network policy… vẫn cần quản trị).
 
 ---
 
-## 8) Quality gates: 5 chốt chặn trước khi publish (cốt lõi để tránh “SEO rác”)
+## 4) Compose tối thiểu: OpenClaw + Redis (một dependency dễ gặp)
 
-Tự động hóa hằng ngày rất dễ trượt sang nội dung mỏng hoặc na ná nhau. Hãy đặt quality gates theo thứ tự:
+Nếu agent của bạn cần cache/queue/rate limit, Redis là ví dụ nhỏ gọn để minh hoạ.
 
-### Gate 1 — Topic gate
-- allowlist/denylist chủ đề  
-- mục tiêu từ khóa rõ, không nhồi nhét  
-- chặn chủ đề nhạy cảm nếu không có review người
+### `compose.yaml` (tối thiểu)
 
-### Gate 2 — Source gate
-- yêu cầu tối thiểu số lượng nguồn (tùy chuẩn nội bộ)  
-- loại nguồn kém chất lượng (không rõ tác giả, không kiểm chứng)  
-- cảnh giác nguồn có nguy cơ prompt injection (UGC không kiểm duyệt)
+    services:
+      openclaw:
+        build:
+          context: .
+          dockerfile: docker/Dockerfile
+        image: openclaw-runner:local
+        env_file:
+          - .env
+        environment:
+          APP_MODE: "server"
+          REDIS_URL: "redis://redis:6379/0"
+        volumes:
+          - ./configs:/app/configs:ro
+        ports:
+          - "8080:8080"
+        restart: unless-stopped
+        depends_on:
+          - redis
 
-### Gate 3 — Factuality gate
-- đánh dấu câu có rủi ro “nghe hợp lý nhưng thiếu căn cứ”  
-- nếu không có nguồn đáng tin: chuyển trạng thái *needs_review* hoặc *skip*
+      redis:
+        image: redis:7-alpine
+        restart: unless-stopped
+        volumes:
+          - redis_data:/data
 
-### Gate 4 — Style/brand gate
-- kiểm tra tone, thuật ngữ, cấu trúc heading  
-- đảm bảo bài bám intent (hướng dẫn phải có bước, có điều kiện áp dụng, có lưu ý)
+    volumes:
+      redis_data:
 
-### Gate 5 — Publish gate
-- category nhạy cảm (y tế/tài chính/tâm lý): bắt buộc **human-in-the-loop**  
-- bài thường: có thể publish tự động nhưng phải lưu audit trail
+Chạy thử:
 
----
+    cp .env.example .env
+    docker compose up --build
+    docker compose logs -f openclaw
 
-## 9) Tự động xuất bản lên CMS: idempotency, chống đăng trùng, audit trail
-
-Lỗi phổ biến nhất của hệ thống đăng bài tự động là **đăng trùng** (do retry hoặc scheduler chạy chồng). Hai kỹ thuật nên có:
-
-### Idempotency key
-Tạo khóa duy nhất theo ngày + topic (hoặc ngày + keyword cluster). Nếu key đã tồn tại (status=published) thì **không đăng lại**.
-
-### Distributed lock (khi có nhiều worker)
-Dùng Redis lock theo `date` hoặc `topic_slug` để đảm bảo chỉ một worker publish một bài tại một thời điểm.
-
-### Audit trail tối thiểu cần lưu
-- prompt đã dùng  
-- context/citations đã retrieve  
-- bản nháp và bản cuối  
-- thời gian chạy, lỗi (nếu có)  
-- chi phí token theo bài/ngày (nếu gọi API)
+Gợi ý production: pin tag/digest cho image (thay vì dùng `latest`), và đặt resource limits phù hợp.
 
 ---
 
-## 10) Observability: để pipeline chạy 30 ngày không “ngã”
+## 5) Compose “agent stack”: thêm Vector DB + chuẩn hoá logging/quan sát
 
-Một pipeline daily bền vững không đến từ “prompt hay”, mà đến từ vận hành tốt:
+Nếu OpenClaw của bạn có retrieval/embeddings, một Vector DB (Qdrant/Milvus/Weaviate/pgvector…) thường là mảnh ghép hợp lý. Xu hướng “pipeline hoá” embeddings/indexing ngày càng phổ biến; container hoá giúp chuẩn hoá môi trường chạy giữa local ↔ CI ↔ staging.
 
-- **Structured logging** (JSON) + `correlation_id` cho từng bài  
-- **Retry/backoff có giới hạn**; bước fail đưa vào dead-letter (hoặc trạng thái `failed`) để xử lý sau  
-- **Monitoring/alert tối thiểu**:
-  - tỉ lệ job fail/ngày
-  - thời gian chạy trung bình
-  - chi phí token/ngày
-  - lỗi publish (401/429/5xx) từ CMS API
+Ví dụ minh hoạ dùng **Qdrant** (bạn có thể thay bằng lựa chọn khác theo stack):
+
+    services:
+      openclaw:
+        build:
+          context: .
+          dockerfile: docker/Dockerfile
+        env_file: [.env]
+        environment:
+          VECTOR_DB_URL: "http://qdrant:6333"
+          REDIS_URL: "redis://redis:6379/0"
+          LOG_FORMAT: "json"
+        volumes:
+          - ./configs:/app/configs:ro
+        depends_on: [redis, qdrant]
+        restart: unless-stopped
+
+      redis:
+        image: redis:7-alpine
+        volumes: [redis_data:/data]
+        restart: unless-stopped
+
+      qdrant:
+        image: qdrant/qdrant:latest
+        volumes:
+          - qdrant_data:/qdrant/storage
+        restart: unless-stopped
+        ports:
+          - "6333:6333"
+
+    volumes:
+      redis_data:
+      qdrant_data:
+
+### Logging “Docker-friendly” (tối thiểu nhưng đáng giá)
+Theo tinh thần “harness engineering” (nhấn mạnh vận hành ổn định thay vì chỉ prompt), nên chuẩn hoá:
+- Log **structured JSON** ra stdout/stderr (để Docker log driver/stack quan sát thu thập dễ).
+- Gắn **correlation ID** theo request/job để trace.
+- Timeout + retry/backoff khi gọi LLM/provider/tool.
+
+Lưu ý biên tập: “harness engineering” từ bài viết quan điểm (dev.to). Hãy dùng như best practice vận hành, không trình bày như kết luận học thuật.
 
 ---
 
-## 11) Guardrails và trách nhiệm nội dung: bắt buộc khi tự động hóa hằng ngày
+## 6) Quản lý cấu hình & secrets: dev khác production
 
-Một số nghiên cứu và phân tích truyền thông gần đây cảnh báo rủi ro khi người dùng dựa vào chatbot để xin lời khuyên cá nhân. Dù bạn không làm chatbot tương tác, rủi ro tương tự vẫn xuất hiện khi bot **tự động xuất bản** nội dung có thể bị hiểu là tư vấn.
+### Local/dev
+- Dùng `.env` (không commit), kèm `.env.example` để thống nhất schema.
 
-### Rủi ro phổ biến
-- **Chiều lòng/“nghe có vẻ đúng”** nhưng thiếu căn cứ  
-- **Lời khuyên cá nhân hóa** (y tế/tài chính/tâm lý) có thể gây hại  
-- **Prompt injection** từ dữ liệu crawl  
-- **Bịa nguồn** hoặc trích dẫn sai
+Ví dụ `.env.example`:
 
-### Guardrails thực dụng
-- Policy layer: allowlist/denylist; cấm “kê đơn/khuyến nghị đầu tư cá nhân”  
-- Disclaimer theo ngữ cảnh cho bài nhạy cảm  
-- Human review bắt buộc cho danh mục rủi ro cao  
-- Lưu đầy đủ prompt/context/citations để truy vết
+    # LLM / Provider
+    LLM_PROVIDER=
+    LLM_API_KEY=
+
+    # App mode
+    APP_MODE=server
+
+    # Guardrails (tuỳ chọn)
+    TOOL_ALLOWLIST=web_search,doc_retrieval
+    MAX_TOOL_CALLS=8
+    REQUEST_TIMEOUT_SEC=60
+
+### Production
+- Tránh “chia sẻ tay” `.env` trên server.
+- Ưu tiên secrets manager theo hạ tầng (Vault / AWS Secrets Manager / GCP Secret Manager…).
+- Nếu chạy Swarm/Kubernetes, dùng cơ chế secrets tương ứng.
+
+### Tránh tuyệt đối
+- Truyền secrets qua `ARG` trong Dockerfile.
+- Ghi API key vào `config.yaml` rồi bake vào image.
+
+---
+
+## 7) Guardrails & an toàn vận hành: đừng đánh đồng “Docker = an toàn”
+
+Nghiên cứu về rủi ro khi chatbot đưa “lời khuyên cá nhân” (TechCrunch tóm lược nghiên cứu Stanford) là lời nhắc thực tế: nếu bạn triển khai agent cho CSKH/HR/tài chính/y tế…, rủi ro nội dung và rủi ro vận hành là chuyện phải tính trước.
+
+Docker **không** tự làm hệ thống an toàn hơn về mặt nội dung. Docker chỉ giúp bạn **triển khai đồng nhất** cấu hình guardrails, audit logs và boundary ở mức runtime.
+
+Checklist guardrails tối thiểu nên có:
+- **Tool allowlist**: agent chỉ gọi tool được phép.
+- **Timeout + retry có kiểm soát**: tránh treo job hoặc vòng lặp vô hạn.
+- **Rate limit / concurrency limit**: giảm blast radius và kiểm soát chi phí.
+- **Audit logs**: ghi lại tool calls và quyết định quan trọng (cân nhắc ẩn/giảm dữ liệu nhạy cảm).
+- **Network egress policy** (nếu có web browsing): qua proxy/allowlist domain.
+- **Container hardening**: chạy non-root, hạn chế capabilities; cân nhắc filesystem read-only cho phần không cần ghi.
+
+---
+
+## 8) Tách evaluation thành job/container (regression cho agent)
+
+Xu hướng hệ thống hoá evaluation (ví dụ EVA cho voice agents) gợi ý một pattern quan trọng: **tách evaluation thành job/container độc lập**, chạy trong CI để chặn chất lượng “trôi” khi bạn đổi prompt, tool, model hoặc dependencies.
+
+Ví dụ thêm service `openclaw-eval` (chạy theo profile):
+
+    services:
+      openclaw-eval:
+        image: openclaw-runner:local
+        env_file: [.env]
+        environment:
+          APP_MODE: "worker"
+          EVAL_MODE: "1"
+        volumes:
+          - ./configs:/app/configs:ro
+          - ./eval_sets:/app/eval_sets:ro
+        command: ["python", "-m", "openclaw_app.eval", "--set", "/app/eval_sets/golden.jsonl"]
+        profiles: ["eval"]
+
+Chạy evaluation khi cần:
+
+    docker compose --profile eval run --rm openclaw-eval
+
+Trong CI, bạn có thể fail pipeline nếu:
+- tỉ lệ pass dưới ngưỡng,
+- latency vượt ngưỡng,
+- hoặc phát hiện nhóm lỗi safety theo policy.
+
+---
+
+## 9) (Tuỳ chọn) Chạy với GPU: nguyên tắc tương thích và lỗi hay gặp
+
+Nếu pipeline của bạn có bước embeddings/indexing/inference cần GPU:
+
+- Container dùng GPU **phụ thuộc driver NVIDIA trên host** và `nvidia-container-toolkit`.
+- Pin CUDA runtime trong image giúp ổn định, nhưng vẫn phải đảm bảo **driver host tương thích**.
+
+Cách chạy thường gặp:
+- CLI: `docker run --gpus all ...`
+- Compose: cấu hình GPU tuỳ phiên bản Docker/Compose (cần kiểm tra cú pháp tương thích môi trường của bạn).
+
+Các lỗi phổ biến:
+- mismatch driver/CUDA (load library thất bại),
+- OOM do batch size/sequence length,
+- hiệu năng thấp do cấu hình chưa phù hợp.
+
+Khuyến nghị: luôn có **fallback CPU** cho môi trường CI hoặc server không có GPU.
+
+---
+
+## 10) Checklist production-ready (ngắn gọn, dùng được ngay)
+
+- **Reproducibility**
+  - Pin phiên bản base image, dependencies (lockfile), hạn chế dùng `latest`.
+  - Tách config khỏi image; mount read-only khi có thể.
+- **Security**
+  - Chạy non-root; hạn chế capabilities; cân nhắc read-only filesystem.
+  - Không bake secrets; ưu tiên secrets manager.
+- **Operability**
+  - Structured logs; correlation ID; timeout/retry/backoff.
+  - Healthcheck (nếu là API) hoặc heartbeat (nếu worker).
+- **Quality**
+  - Tách evaluation job/container; chạy regression trong CI trước khi release.
+- **Data**
+  - Rõ volume nào persistent, volume nào ephemeral; có plan backup/restore nếu cần.
 
 ---
 
 ## Kết luận
 
-Tích hợp OpenClaw vào VPS để tạo nội dung tự động hằng ngày không chỉ là “chạy được một script”. Để vận hành bền, bạn cần kiến trúc production-first gồm **scheduler + queue/worker + RAG + publish + observability**, và quan trọng nhất là **quality gates + guardrails**. Làm đúng, đội nhỏ vẫn có thể vận hành một “content factory” ổn định: kiểm soát chi phí, nâng độ chính xác nhờ RAG, và giảm rủi ro khi tự động xuất bản.
+Docker hoá OpenClaw không dừng ở “đóng gói để chạy được”. Mục tiêu đúng là biến agent từ demo thành hệ thống **tái lập được**, **quản trị được**, và **vận hành được**: pin version để tránh drift, quản lý secrets đúng cách, chuẩn hoá logging/timeout/retry, tách evaluation để khoá chất lượng, và triển khai guardrails đồng nhất giữa môi trường.
 
 ---
 
@@ -280,6 +325,9 @@ Tích hợp OpenClaw vào VPS để tạo nội dung tự động hằng ngày k
 
 - https://huggingface.co/blog/liberate-your-openclaw  
 - https://towardsdatascience.com/using-openclaw-as-a-force-multiplier-what-one-person-can-ship-with-autonomous-agents/  
+- https://dev.to/thisismustafailhan/beyond-the-prompt-why-harness-engineering-is-the-real-successor-to-prompt-engineering-348  
+- https://huggingface.co/blog/ServiceNow-AI/eva  
 - https://huggingface.co/blog/nvidia/domain-specific-embedding-finetune  
-- https://techcrunch.com/2026/03/28/stanford-study-outlines-dangers-of-asking-ai-chatbots-for-personal-advice/  
-- https://huggingface.co/blog/huggingface/state-of-os-hf-spring-2026
+- https://huggingface.co/blog/huggingface/state-of-os-hf-spring-2026  
+- https://huggingface.co/blog/ibm-granite/granite-libraries  
+- https://techcrunch.com/2026/03/28/stanford-study-outlines-dangers-of-asking-ai-chatbots-for-personal-advice/

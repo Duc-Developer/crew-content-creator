@@ -58,7 +58,10 @@ seo_planning_task:
 article_writing_task:
   description: >
     Write a high-quality Vietnamese article about {topic} using the research brief,
-    technical review and SEO brief.
+    technical review, SEO brief and image digest.
+
+    Available image digest:
+    {image_digest}
 
     Requirements:
     - Write in Vietnamese.
@@ -66,6 +69,10 @@ article_writing_task:
     - Start with a strong introduction explaining why the topic matters now.
     - Organize the article into a clear, reader-friendly structure with meaningful headings.
     - Synthesize insights from the approved sources instead of copying any source wording.
+    - Select the most relevant source-grounded image from the image digest for the article cover if one is available.
+    - Add a short metadata block near the top in markdown using this exact format:
+      Cover Image: <image url or empty>
+      Cover Image Source: <source article url or empty>
     - Include a short section summarizing practical implications for engineers, builders or tech leaders in Vietnam.
     - End with a concise conclusion.
   expected_output: >
@@ -82,6 +89,7 @@ final_edit_task:
     - Remove repetition, weak transitions and unnecessary filler.
     - Preserve technical accuracy and SEO intent.
     - Ensure the final article reads naturally for Vietnamese tech readers.
+    - Preserve the cover image metadata block if present.
     - Output only the final article in markdown format.
   expected_output: >
     A final publication-ready Vietnamese markdown article without code fences.

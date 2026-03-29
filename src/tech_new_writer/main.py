@@ -7,11 +7,11 @@ from datetime import datetime
 
 from tech_new_writer.crew import TechNewWriter
 from tech_new_writer.forem_publisher import publish_markdown_file
-from tech_new_writer.source_fetcher import build_source_digest
+from tech_new_writer.source_fetcher import build_image_digest, build_source_digest
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 
-DEFAULT_TOPIC = "Hướng dẫn tích hợp OpenCLaw vào vps để tạo nội dung tự động hàng ngày"
+DEFAULT_TOPIC = "Hướng dẫn tích hợp OpenCLaw bằng docker"
 DEFAULT_SOURCES = ",".join(
     [
         "https://techcrunch.com/",
@@ -27,10 +27,12 @@ def build_inputs() -> dict[str, str]:
     topic = os.getenv("TECH_TOPIC", DEFAULT_TOPIC)
     sources = os.getenv("TECH_SOURCES", DEFAULT_SOURCES)
     source_digest = build_source_digest(sources)
+    image_digest = build_image_digest(sources)
     return {
         "topic": topic,
         "sources": sources,
         "source_digest": source_digest,
+        "image_digest": image_digest,
         "current_year": str(datetime.now().year),
     }
 
@@ -41,7 +43,7 @@ def run():
     try:
         result = TechNewWriter().crew().kickoff(inputs=inputs)
         if os.getenv("FOREM_AUTO_PUBLISH_DRAFT", "true").lower() == "true":
-            publish_result = publish_markdown_file()
+            publish_result = publish_markdown_file(topic=inputs["topic"])
             print(f"Forem draft created: {publish_result['title']} ({publish_result['url']})")
         return result
     except Exception as e:
