@@ -29,7 +29,7 @@ RSS_CANDIDATES = {
 
 POPULAR_URLS = {
     "techcrunch.com": "https://techcrunch.com/popular/",
-    "www.theverge.com": "https://www.theverge.com/",
+    "www.theverge.com": "https://www.theverge.com/tech",
     "huggingface.co": "https://huggingface.co/blog",
     "towardsdatascience.com": "https://towardsdatascience.com/",
     "dev.to": "https://dev.to/top/week",

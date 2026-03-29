@@ -1,0 +1,11 @@
+services:
+  tech-new-writer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tech-new-writer:latest
+    env_file:
+      - .env
+    working_dir: /app
+    command: run_crew
+    restart: "no"

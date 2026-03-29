@@ -1,0 +1,14 @@
+.git
+.venv
+.pytest_cache
+.runtime_sections
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+dist
+build
+tests
+README.md
+AGENTS.md

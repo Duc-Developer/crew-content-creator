@@ -9,6 +9,12 @@ from crewai import Crew, Process
 
 from tech_new_writer.crew import TechNewWriter
 from tech_new_writer.forem_publisher import publish_markdown_file
+from tech_new_writer.session_workspace import (
+    cleanup_section_workspace,
+    create_section_workspace,
+    resolve_output_path,
+    section_output_paths,
+)
 from tech_new_writer.source_fetcher import (
     build_image_digest,
     build_source_digest,
@@ -69,18 +75,53 @@ def single_article_crew() -> Crew:
         verbose=True,
     )
 
+
+def topic_crew(writer: TechNewWriter) -> Crew:
+    return Crew(
+        agents=[
+            writer.trend_researcher(),
+            writer.sme(),
+            writer.seo_specialist(),
+            writer.content_writer(),
+            writer.editor(),
+        ],
+        tasks=[
+            writer.trend_research_task(),
+            writer.technical_review_task(),
+            writer.seo_planning_task(),
+            writer.article_writing_task(),
+            writer.final_edit_task(),
+        ],
+        process=Process.sequential,
+        verbose=True,
+    )
+
+
+def build_section_writer(prefix: str) -> tuple[TechNewWriter, dict[str, str], object]:
+    _, workspace = create_section_workspace(prefix)
+    output_paths = section_output_paths(workspace)
+    writer = TechNewWriter()
+    writer._section_output_paths = output_paths
+    return writer, output_paths, workspace
+
 def run():
     """Run the crew."""
     inputs = build_inputs()
 
+    writer, output_paths, workspace = build_section_writer("topic")
     try:
-        result = TechNewWriter().crew().kickoff(inputs=inputs)
+        result = topic_crew(writer).kickoff(inputs=inputs)
         if os.getenv("FOREM_AUTO_PUBLISH_DRAFT", "true").lower() == "true":
-            publish_result = publish_markdown_file(topic=inputs["topic"])
+            publish_result = publish_markdown_file(
+                markdown_file=resolve_output_path(output_paths["final_article"]),
+                topic=inputs["topic"],
+            )
             print(f"Forem draft created: {publish_result['title']} ({publish_result['url']})")
         return result
     except Exception as e:
         raise Exception(f"An error occurred while running the crew: {e}")
+    finally:
+        cleanup_section_workspace(workspace)
 
 
 def run_with_prompted_topic():
@@ -91,14 +132,20 @@ def run_with_prompted_topic():
     sources = os.getenv("TECH_SOURCES", DEFAULT_SOURCES)
     inputs = build_inputs_for_topic(topic, sources)
 
+    writer, output_paths, workspace = build_section_writer("prompted")
     try:
-        result = TechNewWriter().crew().kickoff(inputs=inputs)
+        result = topic_crew(writer).kickoff(inputs=inputs)
         if os.getenv("FOREM_AUTO_PUBLISH_DRAFT", "true").lower() == "true":
-            publish_result = publish_markdown_file(topic=inputs["topic"])
+            publish_result = publish_markdown_file(
+                markdown_file=resolve_output_path(output_paths["final_article"]),
+                topic=inputs["topic"],
+            )
             print(f"Forem draft created: {publish_result['title']} ({publish_result['url']})")
         return result
     except Exception as e:
         raise Exception(f"An error occurred while running prompted topic flow: {e}")
+    finally:
+        cleanup_section_workspace(workspace)
 
 
 def run_daily_top_source_articles():
@@ -107,6 +154,7 @@ def run_daily_top_source_articles():
     results = []
 
     for source in [item.strip() for item in sources.split(",") if item.strip()]:
+        workspace = None
         top_article_url = extract_top_article_url(source)
         if not top_article_url:
             print(f"Skip source without top article: {source}")
@@ -120,10 +168,31 @@ def run_daily_top_source_articles():
             inputs["original_title"] = original_title
 
         try:
-            result = single_article_crew().kickoff(inputs=inputs)
+            writer, output_paths, workspace = build_section_writer("daily")
+            result = Crew(
+                agents=[
+                    writer.trend_researcher(),
+                    writer.sme(),
+                    writer.seo_specialist(),
+                    writer.content_writer(),
+                    writer.editor(),
+                ],
+                tasks=[
+                    writer.single_article_research_task(),
+                    writer.single_article_technical_review_task(),
+                    writer.single_article_seo_task(),
+                    writer.single_article_writing_task(),
+                    writer.single_article_final_edit_task(),
+                ],
+                process=Process.sequential,
+                verbose=True,
+            ).kickoff(inputs=inputs)
             publish_result = None
             if os.getenv("FOREM_AUTO_PUBLISH_DRAFT", "true").lower() == "true":
-                publish_result = publish_markdown_file(topic=inputs["topic"])
+                publish_result = publish_markdown_file(
+                    markdown_file=resolve_output_path(output_paths["final_article"]),
+                    topic=inputs["topic"],
+                )
                 print(f"Forem draft created: {publish_result['title']} ({publish_result['url']})")
             results.append(
                 {
@@ -135,6 +204,9 @@ def run_daily_top_source_articles():
             )
         except Exception as e:
             print(f"Failed source {source}: {e}")
+        finally:
+            if workspace is not None:
+                cleanup_section_workspace(workspace)
 
     return results
 
