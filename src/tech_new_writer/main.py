@@ -6,11 +6,12 @@ import warnings
 from datetime import datetime
 
 from tech_new_writer.crew import TechNewWriter
+from tech_new_writer.forem_publisher import publish_markdown_file
 from tech_new_writer.source_fetcher import build_source_digest
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 
-DEFAULT_TOPIC = "AI"
+DEFAULT_TOPIC = "Hướng dẫn tích hợp OpenCLaw vào vps để tạo nội dung tự động hàng ngày"
 DEFAULT_SOURCES = ",".join(
     [
         "https://techcrunch.com/",
@@ -38,7 +39,11 @@ def run():
     inputs = build_inputs()
 
     try:
-        TechNewWriter().crew().kickoff(inputs=inputs)
+        result = TechNewWriter().crew().kickoff(inputs=inputs)
+        if os.getenv("FOREM_AUTO_PUBLISH_DRAFT", "true").lower() == "true":
+            publish_result = publish_markdown_file()
+            print(f"Forem draft created: {publish_result['title']} ({publish_result['url']})")
+        return result
     except Exception as e:
         raise Exception(f"An error occurred while running the crew: {e}")
 

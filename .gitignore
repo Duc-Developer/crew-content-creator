@@ -1,3 +1,8 @@
 .env
 __pycache__/
 .DS_Store
+my-blogs-key.json
+my-blogs-owner.json
+
+draft_article.md
+final_article.md
