@@ -5,9 +5,16 @@ import warnings
 
 from datetime import datetime
 
+from crewai import Crew, Process
+
 from tech_new_writer.crew import TechNewWriter
 from tech_new_writer.forem_publisher import publish_markdown_file
-from tech_new_writer.source_fetcher import build_image_digest, build_source_digest
+from tech_new_writer.source_fetcher import (
+    build_image_digest,
+    build_source_digest,
+    extract_article_title,
+    extract_top_article_url,
+)
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 
@@ -15,7 +22,7 @@ DEFAULT_TOPIC = "Hướng dẫn tích hợp OpenCLaw bằng docker"
 DEFAULT_SOURCES = ",".join(
     [
         "https://techcrunch.com/",
-        "https://www.theverge.com/",
+        "https://www.theverge.com/tech",
         "https://huggingface.co/blog",
         "https://towardsdatascience.com/",
         "https://dev.to/",
@@ -26,6 +33,10 @@ DEFAULT_SOURCES = ",".join(
 def build_inputs() -> dict[str, str]:
     topic = os.getenv("TECH_TOPIC", DEFAULT_TOPIC)
     sources = os.getenv("TECH_SOURCES", DEFAULT_SOURCES)
+    return build_inputs_for_topic(topic, sources)
+
+
+def build_inputs_for_topic(topic: str, sources: str) -> dict[str, str]:
     source_digest = build_source_digest(sources)
     image_digest = build_image_digest(sources)
     return {
@@ -35,6 +46,28 @@ def build_inputs() -> dict[str, str]:
         "image_digest": image_digest,
         "current_year": str(datetime.now().year),
     }
+
+
+def single_article_crew() -> Crew:
+    writer = TechNewWriter()
+    return Crew(
+        agents=[
+            writer.trend_researcher(),
+            writer.sme(),
+            writer.seo_specialist(),
+            writer.content_writer(),
+            writer.editor(),
+        ],
+        tasks=[
+            writer.single_article_research_task(),
+            writer.single_article_technical_review_task(),
+            writer.single_article_seo_task(),
+            writer.single_article_writing_task(),
+            writer.single_article_final_edit_task(),
+        ],
+        process=Process.sequential,
+        verbose=True,
+    )
 
 def run():
     """Run the crew."""
@@ -48,6 +81,62 @@ def run():
         return result
     except Exception as e:
         raise Exception(f"An error occurred while running the crew: {e}")
+
+
+def run_with_prompted_topic():
+    """Prompt for a topic from terminal input and run the crew."""
+    topic = input("Nhập topic: ").strip()
+    if not topic:
+        topic = DEFAULT_TOPIC
+    sources = os.getenv("TECH_SOURCES", DEFAULT_SOURCES)
+    inputs = build_inputs_for_topic(topic, sources)
+
+    try:
+        result = TechNewWriter().crew().kickoff(inputs=inputs)
+        if os.getenv("FOREM_AUTO_PUBLISH_DRAFT", "true").lower() == "true":
+            publish_result = publish_markdown_file(topic=inputs["topic"])
+            print(f"Forem draft created: {publish_result['title']} ({publish_result['url']})")
+        return result
+    except Exception as e:
+        raise Exception(f"An error occurred while running prompted topic flow: {e}")
+
+
+def run_daily_top_source_articles():
+    """Run once for cron: pick one popular article per source and create separate drafts."""
+    sources = os.getenv("TECH_SOURCES", DEFAULT_SOURCES)
+    results = []
+
+    for source in [item.strip() for item in sources.split(",") if item.strip()]:
+        top_article_url = extract_top_article_url(source)
+        if not top_article_url:
+            print(f"Skip source without top article: {source}")
+            continue
+
+        original_title = extract_article_title(top_article_url)
+        topic = original_title or f"Bài viết công nghệ nổi bật từ {source}"
+        inputs = build_inputs_for_topic(topic, source)
+        inputs["top_article_url"] = top_article_url
+        if original_title:
+            inputs["original_title"] = original_title
+
+        try:
+            result = single_article_crew().kickoff(inputs=inputs)
+            publish_result = None
+            if os.getenv("FOREM_AUTO_PUBLISH_DRAFT", "true").lower() == "true":
+                publish_result = publish_markdown_file(topic=inputs["topic"])
+                print(f"Forem draft created: {publish_result['title']} ({publish_result['url']})")
+            results.append(
+                {
+                    "source": source,
+                    "top_article_url": top_article_url,
+                    "result": result,
+                    "publish_result": publish_result,
+                }
+            )
+        except Exception as e:
+            print(f"Failed source {source}: {e}")
+
+    return results
 
 
 def train():

@@ -94,3 +94,82 @@ final_edit_task:
   expected_output: >
     A final publication-ready Vietnamese markdown article without code fences.
   agent: editor
+
+single_article_research_task:
+  description: >
+    Analyze one specific source article for translation and adaptation into Vietnamese.
+
+    Source article URL:
+    {top_article_url}
+
+    Source digest:
+    {source_digest}
+
+    Image digest:
+    {image_digest}
+
+    Requirements:
+    - Focus on the selected article URL and the evidence available in the digests.
+    - Identify the article's key thesis, technical points, structure and useful takeaways.
+    - Do not invent details beyond the available source material.
+    - Extract what matters most for Vietnamese readers.
+  expected_output: >
+    A markdown brief for one source article including:
+    source url, article title, key points, technical context, audience value, and usable image candidates.
+  agent: trend_researcher
+
+single_article_technical_review_task:
+  description: >
+    Review the selected source article brief for technical accuracy and adaptation quality.
+
+    Requirements:
+    - Validate technical claims and terminology.
+    - Flag nuances or caveats that should be preserved in translation.
+    - Recommend how to adapt the article faithfully for Vietnamese readers.
+  expected_output: >
+    A markdown technical review for the selected source article with validated claims,
+    caveats, terminology notes and adaptation guidance.
+  agent: sme
+
+single_article_seo_task:
+  description: >
+    Build an SEO brief for a Vietnamese adaptation of the selected source article.
+
+    Requirements:
+    - Propose a Vietnamese title and search intent.
+    - Suggest a keyword cluster and heading structure suitable for a translated/adapted article.
+    - Keep the article honest to the source while making it discoverable.
+  expected_output: >
+    A markdown SEO brief for the selected source article adaptation with title,
+    intent, keywords, slug suggestion and H1/H2/H3 structure.
+  agent: seo_specialist
+
+single_article_writing_task:
+  description: >
+    Write a Vietnamese adaptation of the selected source article using the article brief,
+    technical review, SEO brief and image digest.
+
+    Requirements:
+    - Write in Vietnamese.
+    - Preserve the article's main ideas and factual claims.
+    - Adapt phrasing naturally instead of literal translation.
+    - If the original article title is available, prefer adapting that title into natural Vietnamese.
+    - If the original title is unavailable, infer a strong new Vietnamese title from the source article brief.
+    - Include a cover image metadata block if a relevant image is available.
+    - Add a "Nguồn gốc bài viết" section linking to the original article URL.
+  expected_output: >
+    A polished Vietnamese markdown adaptation of the selected source article,
+    ready for final editing and publishing as a draft.
+  agent: content_writer
+
+single_article_final_edit_task:
+  description: >
+    Edit the Vietnamese adaptation of the selected source article into a publication-ready final version.
+
+    Requirements:
+    - Improve clarity, flow and natural Vietnamese style.
+    - Preserve the cover image metadata block if present.
+    - Preserve faithfulness to the original source article.
+  expected_output: >
+    A final publication-ready Vietnamese markdown adaptation without code fences.
+  agent: editor

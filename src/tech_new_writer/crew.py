@@ -88,6 +88,38 @@ class TechNewWriter():
             output_file='final_article.md'
         )
 
+    @task
+    def single_article_research_task(self) -> Task:
+        return Task(
+            config=self.tasks_config['single_article_research_task'], # type: ignore[index]
+        )
+
+    @task
+    def single_article_technical_review_task(self) -> Task:
+        return Task(
+            config=self.tasks_config['single_article_technical_review_task'], # type: ignore[index]
+        )
+
+    @task
+    def single_article_seo_task(self) -> Task:
+        return Task(
+            config=self.tasks_config['single_article_seo_task'], # type: ignore[index]
+        )
+
+    @task
+    def single_article_writing_task(self) -> Task:
+        return Task(
+            config=self.tasks_config['single_article_writing_task'], # type: ignore[index]
+            output_file='draft_article.md'
+        )
+
+    @task
+    def single_article_final_edit_task(self) -> Task:
+        return Task(
+            config=self.tasks_config['single_article_final_edit_task'], # type: ignore[index]
+            output_file='final_article.md'
+        )
+
     @crew
     def crew(self) -> Crew:
         """Creates the TechNewWriter crew"""

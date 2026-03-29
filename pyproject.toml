@@ -13,6 +13,8 @@ dependencies = [
 [project.scripts]
 tech_new_writer = "tech_new_writer.main:run"
 run_crew = "tech_new_writer.main:run"
+run_prompted = "tech_new_writer.main:run_with_prompted_topic"
+run_daily_top = "tech_new_writer.main:run_daily_top_source_articles"
 train = "tech_new_writer.main:train"
 replay = "tech_new_writer.main:replay"
 test = "tech_new_writer.main:test"

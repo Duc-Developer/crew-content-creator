@@ -27,6 +27,14 @@ RSS_CANDIDATES = {
     ],
 }
 
+POPULAR_URLS = {
+    "techcrunch.com": "https://techcrunch.com/popular/",
+    "www.theverge.com": "https://www.theverge.com/",
+    "huggingface.co": "https://huggingface.co/blog",
+    "towardsdatascience.com": "https://towardsdatascience.com/",
+    "dev.to": "https://dev.to/top/week",
+}
+
 
 def candidate_feeds(source_url: str) -> list[str]:
     hostname = urlparse(source_url).netloc.lower()
@@ -59,9 +67,8 @@ def fetch_url(url: str, timeout: int = 20) -> str:
             ],
             check=True,
             capture_output=True,
-            text=True,
         )
-        return completed.stdout
+        return completed.stdout.decode("utf-8", errors="ignore")
 
 
 def parse_feed(xml_text: str) -> list[dict[str, str]]:
@@ -282,3 +289,91 @@ def build_image_digest(source_urls: str, limit_per_source: int = 3) -> str:
         digests.append("\n".join(lines))
 
     return "\n\n".join(digests)
+
+
+def candidate_popular_page(source_url: str) -> str:
+    hostname = urlparse(source_url).netloc.lower()
+    if hostname in POPULAR_URLS:
+        return POPULAR_URLS[hostname]
+    normalized = hostname.removeprefix("www.")
+    return POPULAR_URLS.get(normalized, source_url)
+
+
+def extract_top_article_url(source_url: str) -> str | None:
+    popular_page = candidate_popular_page(source_url)
+    html = fetch_url(popular_page, timeout=20)
+    extract_script = """
+import json, re, sys
+from urllib.parse import urljoin, urlparse
+
+base_url = sys.argv[1]
+html = sys.stdin.read()
+matches = re.findall(r'href=["\\']([^"\\']+)["\\']', html, flags=re.IGNORECASE)
+results = []
+base_host = urlparse(base_url).netloc
+for href in matches:
+    full = urljoin(base_url, href)
+    if urlparse(full).netloc != base_host:
+        continue
+    lowered = full.lower()
+    if any(token in lowered for token in ['/tag/', '/tags/', '/about', '/login', '/signup', '/newsletter', '/podcasts', '/videos']):
+        continue
+    if lowered.rstrip('/') == base_url.rstrip('/'):
+        continue
+    if full not in results:
+        results.append(full)
+print(json.dumps(results[:20], ensure_ascii=False))
+"""
+    completed = subprocess.run(
+        ["python3", "-c", extract_script, popular_page],
+        input=html,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    candidates = json.loads(completed.stdout)
+    for candidate in candidates:
+        lowered = candidate.lower()
+        candidate = candidate.split("#", 1)[0]
+        if lowered.endswith(".xml") or lowered.endswith("/feed") or "/feed" in lowered or "/rss" in lowered:
+            continue
+        if any(token in lowered for token in ["/202", "/20", "/blog/", "/p/"]):
+            return candidate
+    for candidate in candidates:
+        lowered = candidate.lower()
+        candidate = candidate.split("#", 1)[0]
+        if lowered.endswith(".xml") or lowered.endswith("/feed") or "/feed" in lowered or "/rss" in lowered:
+            continue
+        return candidate
+    return None
+
+
+def extract_article_title(article_url: str) -> str | None:
+    html = fetch_url(article_url, timeout=20)
+    extract_script = """
+import re, sys
+html = sys.stdin.read()
+patterns = [
+    r'<meta[^>]+property=["\\']og:title["\\'][^>]+content=["\\']([^"\\']+)["\\']',
+    r'<meta[^>]+name=["\\']twitter:title["\\'][^>]+content=["\\']([^"\\']+)["\\']',
+    r'<title>(.*?)</title>',
+    r'<h1[^>]*>(.*?)</h1>',
+]
+for pattern in patterns:
+    matches = re.findall(pattern, html, flags=re.IGNORECASE | re.DOTALL)
+    for match in matches:
+        cleaned = re.sub(r'<[^>]+>', ' ', match)
+        cleaned = re.sub(r'\\s+', ' ', cleaned).strip()
+        if cleaned:
+            print(cleaned)
+            raise SystemExit(0)
+"""
+    completed = subprocess.run(
+        ["python3", "-c", extract_script],
+        input=html,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    title = completed.stdout.strip()
+    return title or None

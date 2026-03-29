@@ -1,351 +1,137 @@
-# Hướng dẫn tích hợp OpenCLaw bằng Docker (Dockerfile, Compose và best practices)
-
-```markdown
-Cover Image: https://huggingface.co/blog/assets/liberate-your-openclaw/thumbnail.png
-Cover Image Source: https://huggingface.co/blog/liberate-your-openclaw
+```yaml
+---
+cover:
+  image: "https://media2.dev.to/dynamic/image/width=1200,height=627,fit=cover,gravity=auto,format=auto/https%3A%2F%2Fdev-to-uploads.s3.amazonaws.com%2Fuploads%2Farticles%2Fk5cbsgwwbcgzymtwix7q.png"
+  alt: "Bài viết về cách làm migration Supabase RLS idempotent để tránh lỗi policy đã tồn tại khi chạy lại"
+  caption: "Khi migrations phải chạy đi chạy lại ở CI, staging hoặc lúc onboard dev mới, RLS policy rất dễ trở thành điểm gây lỗi nếu không được thiết kế idempotent."
+---
 ```
 
-OpenCLaw đang được nhắc đến ngày càng nhiều trong bối cảnh “agentic productivity” — dùng agent tự động để mở rộng năng lực ship sản phẩm với nguồn lực gọn. Khi bạn chuyển từ demo chạy trên máy cá nhân sang chạy lặp lại trong team, CI/CD hoặc staging/production, vấn đề không còn là “prompt hay” mà là **môi trường chạy có tái lập được không, cấu hình có quản trị được không, và hệ có quan sát/kiểm thử/guardrails không**. Đây là lúc Docker phát huy giá trị: chuẩn hoá runtime, đóng gói phụ thuộc, và tạo một “đường ray” vận hành nhất quán cho agent.
+# Cách chúng tôi làm migration Supabase RLS chạy lại an toàn (idempotent) — và vì sao bạn cũng nên làm
 
-Bài viết này hướng dẫn cách **tích hợp OpenCLaw bằng Docker** theo hướng thực dụng: từ stack tối thiểu (chạy được), đến Compose nhiều dịch vụ (vector DB / cache), rồi các điểm “production-grade” như secrets, logging, evaluation và guardrails. Nội dung được định hướng bởi các tín hiệu gần đây về OpenClaw và hệ sinh thái OSS AI (Hugging Face), thực hành agent stack (Towards Data Science), tư duy “harness engineering” (dev.to), và cảnh báo rủi ro khi chatbot đưa lời khuyên cá nhân (TechCrunch/Stanford).
+Nếu bạn dùng Supabase (Postgres) và triển khai Row Level Security (RLS) nghiêm túc, sớm hay muộn bạn sẽ gặp một kịch bản trớ trêu: **migration chạy “ngon” ở local**, đẩy lên **staging cũng ổn**, nhưng đến lúc cần **chạy lại toàn bộ migrations** (CI dựng database mới, kiểm thử reset/rollback, hoặc đồng đội clone repo và setup từ đầu) thì… gãy.
 
----
-
-## 1) Xác định “OpenCLaw” trong runtime của bạn trước khi Docker hoá
-
-Trước khi viết Dockerfile, bạn cần chốt 3 điều (nếu không, ví dụ sẽ dễ “lệch” so với dự án thực tế):
-
-1) **Bạn chạy OpenCLaw dạng gì?**
-- **CLI/worker** (chạy job theo lệnh, xử lý hàng đợi, cron, pipeline)
-- **API server** (ví dụ FastAPI/Express — có healthcheck, nhận request)
-
-2) **Có phụ thuộc stateful không?**  
-Agent hay cần thêm một hoặc vài mảnh ghép:
-- cache/queue (thường là Redis)
-- vector database (phục vụ retrieval/embeddings)
-- quan sát (log/tracing)
-
-3) **Các biến môi trường tối thiểu là gì?**  
-Ví dụ: API key LLM, model name, endpoint, tool allowlist, cấu hình vector DB…
-
-> Gợi ý: Bài “Liberate your OpenClaw” cho thấy xu hướng làm OpenClaw dễ tiếp cận/triển khai hơn; còn bài trên Towards Data Science nhấn mạnh OpenClaw như “force multiplier”. Khi nhu cầu chạy lặp lại tăng, bước chuẩn hoá runtime bằng container thường trở thành lựa chọn phổ biến (không phải “bắt buộc”, nhưng rất thực dụng).
+Và cái gãy thường không nằm ở schema phức tạp, mà nằm ở những thứ “tưởng đơn giản” như **RLS policy**.
 
 ---
 
-## 2) Cấu trúc repo khuyến nghị (dễ Compose, dễ CI)
+## Vấn đề: chạy lần đầu ổn, chạy lại thì lỗi “policy … for table …”
 
-Một cấu trúc tối giản nhưng “Docker-friendly”:
+Trong bài gốc, dấu hiệu lỗi được nêu rất rõ: khi hệ thống cần re-apply migrations, Postgres trả về lỗi liên quan đến policy đã tồn tại, kiểu như:
 
 ```text
-.
-├─ openclaw_app/                 # mã nguồn (agent runner / server)
-├─ configs/
-│  ├─ config.yaml                # cấu hình không chứa secrets
-│  └─ policy.yaml                # policy/guardrails (tuỳ chọn)
-├─ docker/
-│  ├─ Dockerfile
-│  └─ entrypoint.sh              # chuẩn hoá start-up
-├─ compose.yaml
-├─ .env.example
-└─ Makefile                      # tiện chạy: up/down/logs/eval
+ERROR: policy "Users can view own stitched exports" for table "stitched_exports ...
 ```
 
-**Nguyên tắc quan trọng**
-- Không hardcode secrets trong repo.
-- Không “bake” API key vào Docker image (tránh lộ qua layer/history).
-- Tách **config file** (mount read-only) và **env** (override theo môi trường).
+Dù thông báo trong digest bị cắt, phần quan trọng nằm ở cấu trúc lỗi: **`policy "..." for table "..."`**. Điều này thường ám chỉ tình huống migration đang cố tạo một policy trùng tên / xung đột trên cùng bảng — thứ vốn không sao khi chạy lần đầu trên database “sạch”, nhưng sẽ lộ ra ngay khi bạn chạy lại trên database đã có trạng thái trước đó.
 
 ---
 
-## 3) Dockerfile mẫu (ưu tiên tái lập + an toàn hơn)
+## Vì sao lỗi này hay xảy ra với Supabase RLS migrations?
 
-Vì tài liệu nguồn không “chốt” OpenCLaw là Python/Node/binary trong mọi dự án, dưới đây là **mẫu theo hướng Python** (rất phổ biến cho agent stack). Nếu bạn dùng Node, ý tưởng vẫn giữ nguyên: pin version, cache dependency, chạy non-root, log ra stdout.
+### RLS policy là “đối tượng cấu hình” gắn vào bảng — và rất dễ trùng khi re-run
 
-**`docker/Dockerfile` (mẫu Python)**
+RLS trong Postgres hoạt động thông qua các **policy** gắn với từng table. Khi migration tạo policy mới, nếu bạn chạy lại migration đó trên cùng môi trường mà policy đã tồn tại, việc tạo lại sẽ dẫn tới lỗi.
 
-```dockerfile
-# syntax=docker/dockerfile:1
+Điều khó chịu là: nhiều team chỉ kiểm tra “migrations chạy được” trên một database mới tinh. Nhưng thực tế dev workflow lại liên tục tạo ra các kịch bản “không sạch 100%”:
 
-FROM python:3.11-slim AS runtime
+- CI spin up môi trường rồi apply lại từ đầu (đôi khi có cache/snapshot),
+- Staging reset/rollback để test,
+- Preview environment tạo/huỷ liên tục,
+- Dev mới clone repo, chạy reset và apply lại.
 
-# 1) Cài system deps tối thiểu (tuỳ dự án: git, build tools, libmagic,...)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl \
-  && rm -rf /var/lib/apt/lists/*
+### “Idempotent” là yêu cầu của workflow, không phải “tính năng phụ”
 
-# 2) Tạo user non-root
-RUN useradd -m -u 10001 appuser
-WORKDIR /app
+**Idempotent** (trong bối cảnh migrations) có thể hiểu theo cách thực dụng:
 
-# 3) Copy lockfile trước để tận dụng cache (nếu dùng poetry/pip-tools)
-# Ví dụ pip: requirements.txt phải được pin phiên bản
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+> Bạn có thể chạy cùng một migration nhiều lần, và database vẫn đi đến **trạng thái đúng như mong muốn**, thay vì fail vì “đã tồn tại”.
 
-# 4) Copy source sau cùng
-COPY openclaw_app/ /app/openclaw_app/
-COPY docker/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh && chown -R appuser:appuser /app
-
-USER appuser
-
-# 5) App đọc config từ mount + env
-ENV APP_CONFIG=/app/configs/config.yaml
-
-ENTRYPOINT ["/app/entrypoint.sh"]
-```
-
-**`docker/entrypoint.sh` (ví dụ)**
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Ví dụ: chạy server hoặc worker tuỳ biến môi trường
-# APP_MODE=server|worker
-if [[ "${APP_MODE:-server}" == "server" ]]; then
-  exec python -m openclaw_app.server --config "${APP_CONFIG}"
-else
-  exec python -m openclaw_app.worker --config "${APP_CONFIG}"
-fi
-```
-
-**Điểm cần nhớ**
-- Docker giúp **đóng băng dependencies** (đặc biệt quan trọng khi hệ OSS AI phát triển nhanh và dễ “dependency sprawl”, như các tổng quan hệ sinh thái OSS AI trên Hugging Face thường nhắc tới).
-- Nhưng Docker **không tự làm mọi thứ “tái lập tuyệt đối”**: GPU vẫn phụ thuộc driver host, quyền file/volume vẫn có thể lệch, network policy khác nhau giữa môi trường.
+Với RLS policy, nhu cầu này càng rõ vì lỗi thường chỉ xuất hiện ở lần chạy thứ hai — đúng lúc bạn cần pipeline ổn định nhất.
 
 ---
 
-## 4) docker-compose tối thiểu: chạy OpenCLaw + Redis (hoặc một dependency)
+## Idempotent migration là gì (và nên hiểu đúng để tránh kỳ vọng sai)?
 
-Nếu OpenCLaw của bạn có hàng đợi/caching, Redis là dependency nhỏ gọn để minh hoạ.
+Một migration idempotent không có nghĩa là “không thay đổi gì khi chạy lại”. Nó có nghĩa:
 
-**`compose.yaml` (tối thiểu)**
+- Nếu đối tượng đã ở đúng trạng thái, migration **không gây lỗi**,
+- Nếu chưa đúng trạng thái, migration **đưa về đúng trạng thái**.
 
-```yaml
-services:
-  openclaw:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    image: openclaw-runner:local
-    env_file:
-      - .env
-    environment:
-      APP_MODE: "server"
-      # Ví dụ: trỏ Redis nội bộ Compose
-      REDIS_URL: "redis://redis:6379/0"
-    volumes:
-      - ./configs:/app/configs:ro
-    ports:
-      - "8080:8080"
-    restart: unless-stopped
-    depends_on:
-      - redis
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    volumes:
-      - redis_data:/data
-
-volumes:
-  redis_data:
-```
-
-Chạy thử:
-
-```bash
-cp .env.example .env
-docker compose up --build
-docker compose logs -f openclaw
-```
+Và cũng cần nói rõ: idempotent migrations giúp bạn tránh các lỗi “đã tồn tại” khi rerun, nhưng **không tự động giải quyết mọi dạng drift** (ví dụ: policy tồn tại nhưng logic bên trong đã khác kỳ vọng).
 
 ---
 
-## 5) Compose “agent stack” (mở rộng): thêm vector DB + chuẩn hoá logging/quan sát
+## Vì sao bạn cũng nên làm: CI/CD, staging và onboarding đều cần “chạy lại được”
 
-Nhiều hệ agent cần retrieval/embeddings. Các bài viết về làm embeddings theo miền (domain-specific embeddings) cho thấy xu hướng “pipeline embedding/indexing/serving” ngày càng thực dụng — kéo theo nhu cầu dựng kèm **vector DB** trong môi trường tái lập (local/staging/CI).
+Bài gốc nhấn mạnh “why you should too” vì đây không phải lỗi hiếm gặp của một dự án cụ thể, mà là đặc trưng của cách đội nhóm làm việc với Supabase/Postgres.
 
-Bạn có thể mở rộng Compose theo mô hình “lego” (tương tự xu hướng componentization/libraries hoá trong hệ sinh thái AI): tách runner, DB, tool service, evaluator…
+### 1) CI cần dựng database “fresh” và apply migrations đáng tin cậy
 
-Ví dụ dùng **Qdrant** làm vector DB (chỉ minh hoạ kiến trúc, bạn có thể thay bằng pgvector/Milvus/Weaviate tuỳ stack):
+Trong CI, một bài test thường bắt đầu bằng việc dựng một database mới và apply migrations. Nếu có bất kỳ bước nào không thể chạy lặp, bạn sẽ nhận được pipeline “flaky”: lúc pass lúc fail tuỳ trạng thái môi trường.
 
-```yaml
-services:
-  openclaw:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    env_file: [.env]
-    environment:
-      VECTOR_DB_URL: "http://qdrant:6333"
-      REDIS_URL: "redis://redis:6379/0"
-      LOG_FORMAT: "json"
-    volumes:
-      - ./configs:/app/configs:ro
-    depends_on: [redis, qdrant]
-    restart: unless-stopped
+### 2) Kiểm thử reset/rollback sẽ “vạch mặt” migration không idempotent
 
-  redis:
-    image: redis:7-alpine
-    volumes: [redis_data:/data]
-    restart: unless-stopped
+Nhiều team kiểm thử rollback theo kiểu reset trạng thái rồi apply lại. Nếu migrations không được viết để chạy lại an toàn, những lần test như vậy sẽ biến thành vòng lặp debug mệt mỏi — nhất là khi lỗi chỉ đến từ một policy.
 
-  qdrant:
-    image: qdrant/qdrant:latest
-    volumes:
-      - qdrant_data:/qdrant/storage
-    restart: unless-stopped
-    # Nếu cần truy cập từ host:
-    ports:
-      - "6333:6333"
+### 3) Onboarding dev mới: đừng để trải nghiệm bắt đầu dự án là… một lỗi RLS
 
-volumes:
-  redis_data:
-  qdrant_data:
-```
-
-### Logging “Docker-friendly” (tối thiểu nhưng hiệu quả)
-Theo tinh thần “harness engineering” (vượt prompt thuần tuý), bạn nên chuẩn hoá:
-- log dạng **structured JSON** ra stdout/stderr (để Docker gom log dễ)
-- gắn **correlation ID** cho mỗi request/job
-- timeout/retry/backoff khi gọi LLM/provider/tool
-
-> Lưu ý: “harness engineering” là góc nhìn best practice từ cộng đồng (dev.to). Hãy dùng như khuyến nghị vận hành, không coi như kết luận học thuật.
+Việc đồng đội clone repo và chạy migrations từ đầu là tình huống diễn ra thường xuyên. Nếu họ gặp lỗi kiểu “policy … for table …” ngay từ bước đầu, chi phí onboarding tăng lên ngay lập tức, và bạn mất thời gian hỗ trợ những lỗi đáng lẽ có thể tránh.
 
 ---
 
-## 6) Quản lý cấu hình & secrets: dev khác production
+## Nguyên tắc viết Supabase RLS migrations theo hướng idempotent (mức “best practice”, không phụ thuộc một mẹo duy nhất)
 
-**Local/dev**
-- Dùng `.env` (không commit), kèm `.env.example` để chia sẻ schema.
+Digest không cung cấp chi tiết tác giả dùng câu lệnh SQL nào, nên phần dưới đây được trình bày như **nguyên tắc/khung tư duy** để bạn áp dụng, thay vì khẳng định “bài gốc làm đúng theo từng dòng như sau”.
 
-`.env.example` (gợi ý):
-```env
-# LLM / Provider
-LLM_PROVIDER=
-LLM_API_KEY=
+### Nguyên tắc 1: Đừng chỉ test “apply một lần” — hãy test “rerun”
 
-# App mode
-APP_MODE=server
+Một bài test đơn giản nhưng cực hiệu quả:
 
-# Optional: guardrails
-TOOL_ALLOWLIST=web_search,doc_retrieval
-MAX_TOOL_CALLS=8
-REQUEST_TIMEOUT_SEC=60
-```
+- Apply toàn bộ migrations lên database mới
+- Apply lại lần nữa trên cùng database (hoặc chạy lại quy trình reset/rehydrate bạn dùng trong team)
 
-**Production**
-- Tránh `.env` nằm trên disk theo kiểu “chia sẻ tay”.
-- Ưu tiên secrets manager (tuỳ hạ tầng): Vault / AWS Secrets Manager / GCP Secret Manager…
-- Nếu dùng Docker Swarm/K8s: dùng secret object tương ứng.
+Nếu lần 2 fail, migration đó chưa đạt tiêu chí idempotent.
 
-**Tuyệt đối tránh**
-- `ARG LLM_API_KEY=...` trong Dockerfile (dễ lộ qua build history).
-- Ghi API key vào `config.yaml` rồi bake vào image.
+### Nguyên tắc 2: Xem policy như một phần của “trạng thái mong muốn”, không phải “sự kiện chạy một lần”
 
----
+Hãy viết migrations với mục tiêu:
 
-## 7) Guardrails & an toàn vận hành: Docker không tự làm bạn “an toàn nội dung”
+- Đảm bảo policy **tồn tại đúng tên**, đúng bảng,
+- Và tránh trường hợp “tạo lại” làm fail khi rerun.
 
-Tin tức về nghiên cứu Stanford (được TechCrunch tóm lược) nhấn mạnh rủi ro khi người dùng xin **lời khuyên cá nhân** từ chatbot/agent: có thể xuất hiện hành vi “chiều lòng người dùng” (sycophancy) và đưa khuyến nghị không phù hợp. Nếu bạn tích hợp OpenCLaw cho CSKH, HR, tài chính, y tế… đây là rủi ro vận hành/pháp lý cần tính trước.
+### Nguyên tắc 3: Chọn chiến lược idempotent phù hợp với mức độ bạn chấp nhận
 
-Docker **không** tự giải quyết safety. Docker chỉ giúp bạn:
-- triển khai **đồng nhất cấu hình guardrails**
-- bật **audit logs** nhất quán giữa môi trường
-- giới hạn quyền runtime theo chuẩn container hardening
+Trong thực tế thường có nhiều cách tiếp cận (mỗi cách có trade-off). Ví dụ:
 
-### Checklist guardrails nên có (tối thiểu)
-- **Tool allowlist**: agent chỉ được gọi các tool được phép.
-- **Timeout + retry có kiểm soát**: tránh treo job hoặc lặp vô hạn.
-- **Rate limit / concurrency limit**: tránh bùng chi phí và giảm blast radius.
-- **Audit log**: log lại tool calls, input/output tóm tắt, quyết định quan trọng (cân nhắc ẩn/giảm dữ liệu nhạy cảm).
-- **Network egress policy** (nếu có tool “browse web”): đi qua proxy/allowlist domain.
-- **Container hardening**: chạy non-root, hạn chế capabilities, cân nhắc filesystem read-only cho phần không cần ghi.
+- **Cách thiên về “đưa về trạng thái mong muốn”**: đảm bảo sau migration, policy đúng như bạn định nghĩa (thường đòi hỏi logic cập nhật/replace).
+- **Cách thiên về “không phá môi trường khi rerun”**: nếu đã tồn tại thì không tạo lại, để tránh lỗi.
+
+Điểm mấu chốt: bạn cần nhất quán trong dự án về cách xử lý “policy đã tồn tại” khi chạy lại migrations.
 
 ---
 
-## 8) Tách evaluation thành job/container (regression cho agent)
+## Checklist nhanh trước khi merge một migration RLS
 
-Một tín hiệu đáng chú ý là xu hướng **hệ thống hoá đánh giá agent**, ví dụ framework EVA cho voice agents. Dù EVA tập trung vào voice, bài học tổng quát cho OpenCLaw là: **evaluation nên là một job độc lập**, chạy được trong CI, để ngăn chất lượng “trôi” khi bạn đổi prompt, tool, model, hoặc dependency.
-
-### Mẫu: thêm service `openclaw-eval` vào Compose
-```yaml
-services:
-  openclaw-eval:
-    image: openclaw-runner:local
-    env_file: [.env]
-    environment:
-      APP_MODE: "worker"
-      EVAL_MODE: "1"
-    volumes:
-      - ./configs:/app/configs:ro
-      - ./eval_sets:/app/eval_sets:ro
-    command: ["python", "-m", "openclaw_app.eval", "--set", "/app/eval_sets/golden.jsonl"]
-    profiles: ["eval"]
-```
-
-Chạy evaluation khi cần:
-```bash
-docker compose --profile eval run --rm openclaw-eval
-```
-
-Trong CI, bạn có thể fail pipeline nếu:
-- tỉ lệ pass dưới ngưỡng
-- latency vượt ngưỡng
-- xuất hiện loại lỗi safety nhất định
+- [ ] Migration có thể chạy lại mà không lỗi “policy … for table …”
+- [ ] Bạn đã thử kịch bản CI (database mới) và kịch bản rerun (database đã apply)
+- [ ] Bạn có ghi chú rõ ràng: migration kỳ vọng trạng thái gì sau khi chạy
+- [ ] Nếu policy thay đổi theo thời gian, bạn có kế hoạch migration phiên bản tiếp theo để phản ánh thay đổi (thay vì trông chờ “rerun là tự cập nhật”)
 
 ---
 
-## 9) (Tuỳ chọn) Chạy với GPU: nguyên tắc tương thích và lỗi hay gặp
+## Kết: Với Supabase RLS, “idempotent” nên là tiêu chuẩn mặc định
 
-Nếu bạn có bước embeddings/indexing hoặc inference nội bộ cần GPU, hãy nhớ:
+Điểm rút ra từ câu chuyện trong bài gốc rất thẳng: **migration chạy được một lần chưa đủ**. Đặc biệt với **Supabase RLS policy**, lỗi kiểu:
 
-- Container dùng GPU **phụ thuộc driver NVIDIA trên host** và `nvidia-container-toolkit`.
-- Pin CUDA runtime trong image giúp ổn định môi trường, nhưng bạn vẫn phải đảm bảo **driver host tương thích**.
+> `ERROR: policy "..." for table "..." ...`
 
-Ví dụ chạy với GPU (minh hoạ):
-- CLI: `docker run --gpus all ...`
-- Compose: cấu hình device reservation (tuỳ phiên bản Compose/engine).
+thường chỉ xuất hiện khi bạn cần hệ thống ổn định nhất: CI, staging reset, hoặc khi dev mới bắt đầu làm việc.
 
-Nếu gặp lỗi thường gặp:
-- mismatch driver/CUDA (không load được lib)
-- OOM do batch size/sequence length
-- hiệu năng thấp do cấu hình chưa phù hợp
-
-Nên chuẩn bị chế độ **fallback CPU** cho môi trường không có GPU (đặc biệt khi chạy CI).
+Nếu bạn coi migrations là “nguồn chân lý” cho schema và bảo mật, thì **idempotent** không phải tối ưu phụ, mà là điều kiện để workflow đội nhóm vận hành trơn tru.
 
 ---
 
-## 10) Practical implications cho kỹ sư & tech lead tại Việt Nam
+## Nguồn gốc bài viết
 
-1) **Chuẩn hoá để “ship” nhanh nhưng không vỡ vận hành**  
-OpenCLaw/agent giúp tăng năng suất, nhưng muốn “ship” ở doanh nghiệp Việt (nhiều môi trường, nhiều người), bạn cần Docker để giảm “máy anh chạy được”.
-
-2) **Đầu tư harness (logging, retry, eval) sớm sẽ rẻ hơn chữa cháy**  
-Theo hướng “harness engineering”, thay vì chỉ tinh prompt, hãy chuẩn hoá quan sát và kiểm thử. Điều này đặc biệt hữu ích khi team nhỏ nhưng phải chạy nhiều use-case.
-
-3) **Safety/guardrails là yêu cầu sản phẩm, không phải tuỳ chọn**  
-Rủi ro lời khuyên cá nhân từ chatbot/agent là có thật. Tech lead nên coi policy, audit log, rate limit, tool allowlist là hạng mục bắt buộc khi đưa agent vào luồng thật (CSKH/HR/tài chính).
-
-4) **Dựng “evaluation container” để khoá chất lượng trước khi release**  
-Ngay cả khi bạn không làm voice, tư duy từ EVA (đánh giá có hệ thống) áp dụng tốt cho agent text: regression set, replay test, theo dõi drift.
-
----
-
-## Kết luận
-
-Tích hợp OpenCLaw bằng Docker không chỉ là “đóng gói để chạy được”, mà là bước nền để bạn vận hành agent theo hướng nghiêm túc: **tái lập môi trường, quản trị dependency, quan sát tốt hơn, kiểm thử chất lượng, và triển khai guardrails đồng nhất**. Hãy bắt đầu từ Compose tối thiểu, rồi mở rộng theo nhu cầu (vector DB, evaluation job, GPU) — giữ mục tiêu rõ ràng: biến agent từ demo thành hệ thống có thể tin cậy khi chạy thật.
-
----
-
-## Nguồn tham khảo
-
-- https://huggingface.co/blog/liberate-your-openclaw  
-- https://towardsdatascience.com/using-openclaw-as-a-force-multiplier-what-one-person-can-ship-with-autonomous-agents/  
-- https://dev.to/thisismustafailhan/beyond-the-prompt-why-harness-engineering-is-the-real-successor-to-prompt-engineering-348  
-- https://huggingface.co/blog/ServiceNow-AI/eva  
-- https://huggingface.co/blog/nvidia/domain-specific-embedding-finetune  
-- https://huggingface.co/blog/huggingface/state-of-os-hf-spring-2026  
-- https://huggingface.co/blog/ibm-granite/granite-libraries  
-- https://techcrunch.com/2026/03/28/stanford-study-outlines-dangers-of-asking-ai-chatbots-for-personal-advice/
+Bài viết được chuyển ngữ và biên tập theo bài gốc trên DEV Community:  
+https://dev.to/nareshipme/how-we-made-our-supabase-rls-migrations-idempotent-and-why-you-should-too-4d2g
