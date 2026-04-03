@@ -18,4 +18,6 @@ COPY .env.example ./.env.example
 RUN python -m pip install --upgrade pip && \
     pip install .
 
-CMD ["run_crew"]
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "tech_new_writer.api:app", "--host", "0.0.0.0", "--port", "8000"]
