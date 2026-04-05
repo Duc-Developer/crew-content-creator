@@ -1,54 +1,155 @@
-# TechNewWriter Crew
+# tech_new_writer API
 
-Welcome to the TechNewWriter Crew project, powered by [crewAI](https://crewai.com). This template is designed to help you set up a multi-agent AI system with ease, leveraging the powerful and flexible framework provided by crewAI. Our goal is to enable your agents to collaborate effectively on complex tasks, maximizing their collective intelligence and capabilities.
-
-## Installation
-
-Ensure you have Python >=3.10 <3.14 installed on your system. This project uses [UV](https://docs.astral.sh/uv/) for dependency management and package handling, offering a seamless setup and execution experience.
-
-First, if you haven't already, install uv:
+## Base URL
 
 ```bash
-pip install uv
+export BASE_URL="http://localhost:8000"
 ```
 
-Next, navigate to your project directory and install the dependencies:
+## Publish configuration
 
-(Optional) Lock the dependencies and install them by using the CLI command:
-```bash
-crewai install
-```
-### Customizing
+Hệ thống publish draft qua FOREM API.
 
-**Add your `OPENAI_API_KEY` into the `.env` file**
-
-- Modify `src/tech_new_writer/config/agents.yaml` to define your agents
-- Modify `src/tech_new_writer/config/tasks.yaml` to define your tasks
-- Modify `src/tech_new_writer/crew.py` to add your own logic, tools and specific args
-- Modify `src/tech_new_writer/main.py` to add custom inputs for your agents and tasks
-
-## Running the Project
-
-To kickstart your crew of AI agents and begin task execution, run this from the root folder of your project:
+### Các biến môi trường dùng để publish
 
 ```bash
-$ crewai run
+export FOREM_API_BASE_URL="https://dev.to/api"
+export FOREM_API_KEY="your-api-key"
+export FOREM_TAGS="ai,python,backend"
+export FOREM_AUTO_PUBLISH_DRAFT="true"
 ```
 
-This command initializes the tech-new-writer Crew, assembling the agents and assigning them tasks as defined in your configuration.
+### Ý nghĩa
 
-This example, unmodified, will run the create a `report.md` file with the output of a research on LLMs in the root folder.
+- `FOREM_API_BASE_URL`: base URL của FOREM API, hệ thống sẽ gọi tới `{FOREM_API_BASE_URL}/articles`
+- `FOREM_API_KEY`: API key để tạo bài draft
+- `FOREM_TAGS`: danh sách tag, phân tách bằng dấu phẩy
+- `FOREM_AUTO_PUBLISH_DRAFT`: nếu là `true` thì các flow API sẽ tự publish draft khi không truyền `publish_draft`
 
-## Understanding Your Crew
+### Ví dụ endpoint publish thực tế
 
-The tech-new-writer Crew is composed of multiple AI agents, each with unique roles, goals, and tools. These agents collaborate on a series of tasks, defined in `config/tasks.yaml`, leveraging their collective skills to achieve complex objectives. The `config/agents.yaml` file outlines the capabilities and configurations of each agent in your crew.
+- `https://dev.to/api/articles`
+- `https://your-forem-site.com/api/articles`
 
-## Support
+## Endpoints
 
-For support, questions, or feedback regarding the TechNewWriter Crew or crewAI.
-- Visit our [documentation](https://docs.crewai.com)
-- Reach out to us through our [GitHub repository](https://github.com/joaomdmoura/crewai)
-- [Join our Discord](https://discord.com/invite/X4JWnZnxPb)
-- [Chat with our docs](https://chatg.pt/DWjSBZn)
+### `GET /health`
 
-Let's create wonders together with the power and simplicity of crewAI.
+```bash
+curl "$BASE_URL/health"
+```
+
+### `POST /runs/topic`
+
+Chạy flow viết bài theo `topic` và danh sách `sources`.
+
+#### Body params
+
+- `topic`: chuỗi topic, không bắt buộc
+- `sources`: chuỗi URL phân tách bằng dấu phẩy, không bắt buộc
+- `publish_draft`: `true | false | null`, không bắt buộc
+
+#### Ví dụ
+
+```bash
+curl -X POST "$BASE_URL/runs/topic" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+```bash
+curl -X POST "$BASE_URL/runs/topic" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topic": "So sánh FastAPI và Hono cho backend hiệu năng cao",
+    "sources": "https://techcrunch.com/,https://www.theverge.com/tech,https://huggingface.co/blog",
+    "publish_draft": false
+  }'
+```
+
+```bash
+curl -X POST "$BASE_URL/runs/topic" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topic": "Hướng dẫn tích hợp OpenCLaw bằng Docker",
+    "sources": "https://huggingface.co/blog,https://towardsdatascience.com/",
+    "publish_draft": true
+  }'
+```
+
+### `POST /runs/single-article`
+
+Lấy top article từ một nguồn và chạy flow viết lại.
+
+#### Body params
+
+- `source_url`: URL nguồn, bắt buộc
+- `publish_draft`: `true | false | null`, không bắt buộc
+
+#### Ví dụ
+
+```bash
+curl -X POST "$BASE_URL/runs/single-article" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_url": "https://huggingface.co/blog",
+    "publish_draft": false
+  }'
+```
+
+```bash
+curl -X POST "$BASE_URL/runs/single-article" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_url": "https://techcrunch.com/",
+    "publish_draft": true
+  }'
+```
+
+### `POST /runs/daily-top`
+
+Chạy flow cho top article của từng nguồn.
+
+#### Body params
+
+- `sources`: chuỗi URL phân tách bằng dấu phẩy, không bắt buộc
+- `publish_draft`: `true | false | null`, không bắt buộc
+
+#### Ví dụ
+
+```bash
+curl -X POST "$BASE_URL/runs/daily-top" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sources": "https://techcrunch.com/,https://www.theverge.com/tech,https://huggingface.co/blog",
+    "publish_draft": false
+  }'
+```
+
+```bash
+curl -X POST "$BASE_URL/runs/daily-top" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+## Pretty print JSON
+
+```bash
+curl -s "$BASE_URL/health" | python3 -m json.tool
+```
+
+```bash
+curl -s -X POST "$BASE_URL/runs/topic" \
+  -H "Content-Type: application/json" \
+  -d '{"topic":"AI Agents","publish_draft":false}' | python3 -m json.tool
+```
+
+## Run with Docker Compose
+
+```bash
+docker compose up --build
+```
+
+```bash
+curl http://localhost:8000/health
+```

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 
 from pathlib import Path
@@ -96,6 +95,5 @@ def publish_markdown_file(markdown_file: Path | None = None, topic: str | None =
     }
 
 
-def publish_and_print() -> None:
-    result = publish_markdown_file()
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+def publish_and_print(markdown_file: Path | None = None, topic: str | None = None) -> dict[str, str]:
+    return publish_markdown_file(markdown_file=markdown_file, topic=topic)
