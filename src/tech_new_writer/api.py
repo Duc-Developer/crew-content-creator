@@ -43,8 +43,6 @@ class FlowResultResponse(BaseModel):
     topic: str | None
     sources: list[str]
     result: Any
-    draft_article_path: str | None
-    final_article_path: str | None
     final_article_markdown: str | None
     publish_result: dict[str, str] | None
     top_article_url: str | None

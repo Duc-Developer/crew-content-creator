@@ -11,10 +11,6 @@ class TechNewWriter():
     agents: list[BaseAgent]
     tasks: list[Task]
 
-    def output_path(self, key: str, default_name: str) -> str:
-        path_map = getattr(self, "_section_output_paths", {})
-        return path_map.get(key, default_name)
-
     @agent
     def trend_researcher(self) -> Agent:
         config = dict(self.agents_config['trend_researcher'])  # type: ignore[index]
@@ -82,14 +78,12 @@ class TechNewWriter():
     def article_writing_task(self) -> Task:
         return Task(
             config=self.tasks_config['article_writing_task'], # type: ignore[index]
-            output_file=self.output_path("draft_article", "draft_article.md")
         )
 
     @task
     def final_edit_task(self) -> Task:
         return Task(
             config=self.tasks_config['final_edit_task'], # type: ignore[index]
-            output_file=self.output_path("final_article", "final_article.md")
         )
 
     @task
@@ -114,14 +108,12 @@ class TechNewWriter():
     def single_article_writing_task(self) -> Task:
         return Task(
             config=self.tasks_config['single_article_writing_task'], # type: ignore[index]
-            output_file=self.output_path("draft_article", "draft_article.md")
         )
 
     @task
     def single_article_final_edit_task(self) -> Task:
         return Task(
             config=self.tasks_config['single_article_final_edit_task'], # type: ignore[index]
-            output_file=self.output_path("final_article", "final_article.md")
         )
 
     @crew
